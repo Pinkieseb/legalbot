@@ -1,0 +1,5 @@
+venv/
+.venv/
+progress.json
+storage/
+**/__pycache__/
