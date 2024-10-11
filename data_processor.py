@@ -10,6 +10,7 @@ import torch
 import os
 import logging
 from content_schema import content_schema
+import sys
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,9 +27,15 @@ class DataProcessor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logging.info(f"Using device: {self.device}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-        self.model.to(self.device)
-        logging.info(f"Model loaded on {self.device}")
+        
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+            self.model.to(self.device)
+            logging.info(f"Model loaded on {self.device}")
+        except Exception as e:
+            logging.error(f"Failed to load model onto {self.device}: {str(e)}")
+            print(f"Error: Failed to load model. Exiting script.")
+            sys.exit(1)
 
     async def process_api_responses(self, api_responses):
         documents = []
