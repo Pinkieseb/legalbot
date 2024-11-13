@@ -46,7 +46,7 @@ class AusLegalCasesCrawler {
         ];
         
         // Create concurrency pool based on config
-        const concurrency = this.crawler.config.get('rateLimit').concurrency;
+        const concurrency = Math.min(5, this.crawler.config.get('rateLimit').concurrency);
         this.pool = new ConcurrencyPool(concurrency);
     }
 

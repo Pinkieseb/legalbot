@@ -2,9 +2,10 @@ const Crawler = require('./client');
 const { ErrorFactory } = require('./client/errors');
 const { caseLawCollectionPipeline } = require('./flows/caselaw_casecollection');
 const { caseLawContentExtractionPipeline } = require('./flows/caselaw_contentextraction');
+const os = require('os');
 
 /**
- * Example pipeline that extracts all links from a page
+ * Example pipeline that extracts all links from a page with worker thread support
  */
 const linkExtractorPipeline = async function(context) {
     const { crawler, url } = context;
@@ -27,7 +28,7 @@ const linkExtractorPipeline = async function(context) {
 };
 
 /**
- * Example pipeline that extracts specific elements from a page
+ * Example pipeline that extracts specific elements from a page with worker thread support
  */
 const elementExtractorPipeline = async function(context) {
     const { crawler, url, selectors } = context;
@@ -48,56 +49,95 @@ const elementExtractorPipeline = async function(context) {
 };
 
 /**
- * Middleware that adds timing information
+ * Enhanced middleware that adds timing and resource usage information
  */
-const timingMiddleware = async function(context) {
-    // Add timing to context and return enhanced context
-    return {
+const enhancedMiddleware = async function(context) {
+    const startUsage = process.cpuUsage();
+    const startMemory = process.memoryUsage();
+    
+    // Add enhanced monitoring to context
+    const enhancedContext = {
         ...context,
-        timing: {
+        monitoring: {
             startTime: Date.now(),
-            addEndTime: (result) => ({
-                ...result,
-                timing: {
-                    ...context.timing,
-                    endTime: Date.now(),
-                    duration: Date.now() - context.timing.startTime
-                }
-            })
+            startUsage,
+            startMemory,
+            addMetrics: (result) => {
+                const endTime = Date.now();
+                const cpuUsage = process.cpuUsage(startUsage);
+                const memoryUsage = process.memoryUsage();
+                
+                return {
+                    ...result,
+                    metrics: {
+                        duration: endTime - context.monitoring.startTime,
+                        cpu: {
+                            user: cpuUsage.user / 1000000, // Convert to seconds
+                            system: cpuUsage.system / 1000000
+                        },
+                        memory: {
+                            delta: {
+                                heapUsed: memoryUsage.heapUsed - startMemory.heapUsed,
+                                external: memoryUsage.external - startMemory.external
+                            },
+                            final: memoryUsage
+                        }
+                    }
+                };
+            }
         }
     };
+
+    return enhancedContext;
 };
 
 /**
- * Create a crawler instance with example configuration
+ * Create a crawler instance with optimized configuration
  */
 function createCrawler(options = {}) {
+    // Calculate optimal concurrency based on CPU cores
+    const cpuCount = os.cpus().length;
+    const defaultConcurrency = Math.max(1, cpuCount - 1);
+
     const crawler = new Crawler({
         retry: {
-            maxRetries: 3,
-            initialDelay: 1000,
-            maxDelay: 30000,
+            maxRetries: 5,
+            initialDelay: 2000,
+            maxDelay: 60000,
             backoffFactor: 2
         },
         rateLimit: {
-            requestsPerSecond: 2,
-            concurrency: 5
+            requestsPerSecond: 9,
+            concurrency: defaultConcurrency
+        },
+        worker: {
+            maxMemoryUsage: 1024 * 1024 * 512, // 512MB per worker
+            idleTimeout: 30000,
+            restartOnMemory: true,
+            startupTimeout: 5000
+        },
+        batch: {
+            size: 100,
+            maxSize: 1000,
+            minSize: 10,
+            flushInterval: 5000
         },
         logging: {
             level: 'info',
-            silent: false
+            silent: false,
+            format: 'json'
         },
         ...options
     });
 
-    // Add default pipelines
+    // Add optimized pipelines
     crawler.addPipeline('extractLinks', linkExtractorPipeline);
     crawler.addPipeline('extractElements', elementExtractorPipeline);
     crawler.addPipeline('collectCases', caseLawCollectionPipeline);
     crawler.addPipeline('extractContent', caseLawContentExtractionPipeline);
 
-    // Add default middleware
-    crawler.use(timingMiddleware);
+    // Add enhanced middleware
+    crawler.use(enhancedMiddleware);
 
     return crawler;
 }

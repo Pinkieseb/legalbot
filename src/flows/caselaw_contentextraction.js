@@ -41,12 +41,12 @@ class ConcurrencyPool {
     }
 }
 
-// MongoDB Schema
+// MongoDB Schema with indexes for better query performance
 const caseSchema = new mongoose.Schema({
-    case_url: { type: String, required: true, unique: true },
-    case_title: { type: String, required: true },
+    case_url: { type: String, required: true, unique: true, index: true },
+    case_title: { type: String, required: true, index: true },
     content_markdown: { type: String, required: true },
-    processed_at: { type: Date, default: Date.now }
+    processed_at: { type: Date, default: Date.now, index: true }
 });
 
 const Case = mongoose.model('Case', caseSchema);
@@ -59,16 +59,19 @@ class CaseLawContentExtractor {
         this.savedToFileCount = 0;
         this.failedCount = 0;
         
-        // Initialize concurrency pool from crawler config
-        const concurrency = this.crawler.config.get('rateLimit').concurrency;
+        // Initialize concurrency pool based on config
+        const concurrency = Math.min(5, this.crawler.config.get('rateLimit').concurrency);
         this.pool = new ConcurrencyPool(concurrency);
+        
+        // Batch size for MongoDB operations
+        this.batchSize = 100;
+        this.pendingBatch = [];
     }
 
     async connectToMongoDB() {
         try {
             await mongoose.connect('mongodb://localhost:27017/auslaw', {
-                useNewUrlParser: true,
-                useUnifiedTopology: true
+                maxPoolSize: 10
             });
             this.logger.info('Successfully connected to MongoDB');
         } catch (error) {
@@ -78,30 +81,17 @@ class CaseLawContentExtractor {
     }
 
     async extractContent(caseUrl) {
-        return this.pool.add(async () => {
-            try {
-                const response = await this.crawler.fetch(caseUrl);
-                const html = await response.text();
-                const $ = this.crawler.parse(html);
-                
-                // Extract the article content
-                const articleContent = $('article.the-document').html();
-                
-                if (!articleContent) {
-                    throw new Error('Article content not found');
-                }
-                
-                // Convert to markdown
-                const markdown = turndownService.turndown(articleContent);
-                return markdown;
-            } catch (error) {
-                this.logger.error('Content extraction failed', { 
-                    url: caseUrl, 
-                    error: error.message 
-                });
-                throw error;
-            }
-        });
+        const response = await this.crawler.fetch(caseUrl);
+        const html = await response.text();
+        const $ = this.crawler.parse(html);
+        
+        const articleContent = $('article.the-document').html();
+        
+        if (!articleContent) {
+            throw new Error('Article content not found');
+        }
+        
+        return turndownService.turndown(articleContent);
     }
 
     async saveToFile(caseTitle, markdown) {
@@ -123,51 +113,81 @@ class CaseLawContentExtractor {
         }
     }
 
-    async processCase(caseData) {
+    async saveBatchToMongoDB() {
+        if (this.pendingBatch.length === 0) return;
+
         try {
-            // Extract and convert content using the pool
-            const markdown = await this.extractContent(caseData.case_url);
-            
-            // Save first 3 cases to files
-            if (this.savedToFileCount < 3) {
-                await this.saveToFile(caseData.case_title, markdown);
-            }
-            
-            // Save to MongoDB
-            const caseDoc = new Case({
-                case_url: caseData.case_url,
-                case_title: caseData.case_title,
-                content_markdown: markdown
-            });
-            
-            await caseDoc.save();
-            
-            this.processedCount++;
-            if (this.processedCount % 10 === 0) {
-                this.logger.info('Processing progress', {
-                    processed: this.processedCount,
-                    failed: this.failedCount,
-                    total: this.totalCases,
-                    percentComplete: ((this.processedCount / this.totalCases) * 100).toFixed(2) + '%'
-                });
-            }
-            
-            return true;
+            // Use bulkWrite with upsert operations instead of insertMany
+            const bulkOps = this.pendingBatch.map(doc => ({
+                updateOne: {
+                    filter: { case_url: doc.case_url },
+                    update: { $set: doc },
+                    upsert: true
+                }
+            }));
+
+            await Case.bulkWrite(bulkOps, { ordered: false });
+            this.pendingBatch = [];
         } catch (error) {
-            this.failedCount++;
-            this.logger.error('Case processing failed', {
-                case: caseData.case_title,
-                error: error.message
+            // Log error but don't throw since some operations might have succeeded
+            this.logger.error('Some batch operations failed', { 
+                error: error.message,
+                // Extract successful operations count if available
+                successCount: error.result?.nMatched + error.result?.nUpserted || 0
             });
-            return false;
+            // Clear batch to prevent retry loops
+            this.pendingBatch = [];
         }
+    }
+
+    async processCase(caseData) {
+        return this.pool.add(async () => {
+            try {
+                const markdown = await this.extractContent(caseData.case_url);
+                
+                // Save first 3 cases to files
+                if (this.savedToFileCount < 3) {
+                    await this.saveToFile(caseData.case_title, markdown);
+                }
+                
+                // Add to MongoDB batch
+                this.pendingBatch.push({
+                    case_url: caseData.case_url,
+                    case_title: caseData.case_title,
+                    content_markdown: markdown,
+                    processed_at: new Date()
+                });
+
+                // Save batch if it reaches the threshold
+                if (this.pendingBatch.length >= this.batchSize) {
+                    await this.saveBatchToMongoDB();
+                }
+                
+                this.processedCount++;
+                if (this.processedCount % 10 === 0) {
+                    this.logger.info('Processing progress', {
+                        processed: this.processedCount,
+                        failed: this.failedCount,
+                        total: this.totalCases,
+                        percentComplete: ((this.processedCount / this.totalCases) * 100).toFixed(2) + '%'
+                    });
+                }
+                
+                return true;
+            } catch (error) {
+                this.failedCount++;
+                this.logger.error('Case processing failed', {
+                    case: caseData.case_title,
+                    error: error.message
+                });
+                return false;
+            }
+        });
     }
 
     async processBatch(batch) {
         const results = await Promise.all(
-            batch.map(caseData => 
-                this.pool.add(() => this.processCase(caseData))
-            )
+            batch.map(caseData => this.processCase(caseData))
         );
         
         return results.filter(result => result).length;
@@ -179,7 +199,8 @@ class CaseLawContentExtractor {
         this.totalCases = cases.length;
         this.logger.info('Starting content extraction', { 
             totalCases: this.totalCases,
-            concurrency: this.pool.size
+            concurrency: this.pool.size,
+            batchSize: this.batchSize
         });
 
         const batchSize = this.pool.size * 2;
@@ -198,8 +219,13 @@ class CaseLawContentExtractor {
             
             await this.processBatch(batch);
             
-            // Wait for all pending operations to complete before next batch
+            // Wait for all pending operations to complete
             await this.pool.waitForAll();
+            
+            // Save any remaining documents in the batch
+            if (this.pendingBatch.length > 0) {
+                await this.saveBatchToMongoDB();
+            }
             
             this.logger.info('Batch completed', {
                 batchNumber,
@@ -209,6 +235,9 @@ class CaseLawContentExtractor {
                 percentComplete: ((this.processedCount / this.totalCases) * 100).toFixed(2) + '%'
             });
         }
+
+        // Close MongoDB connection
+        await mongoose.connection.close();
 
         this.logger.info('Content extraction completed', {
             totalProcessed: this.processedCount,
