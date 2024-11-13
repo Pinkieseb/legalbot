@@ -3,3 +3,5 @@ venv/
 progress.json
 storage/
 **/__pycache__/
+output/
+node_modules/
