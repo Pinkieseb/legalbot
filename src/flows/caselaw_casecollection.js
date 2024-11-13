@@ -2,6 +2,37 @@ const path = require('path');
 const fs = require('fs').promises;
 const { ErrorFactory } = require('../client/errors');
 
+class ConcurrencyPool {
+    constructor(size) {
+        this.size = size;
+        this.running = 0;
+        this.queue = [];
+    }
+
+    async add(fn) {
+        if (this.running >= this.size) {
+            await new Promise(resolve => this.queue.push(resolve));
+        }
+        this.running++;
+        
+        try {
+            return await fn();
+        } finally {
+            this.running--;
+            if (this.queue.length > 0) {
+                const next = this.queue.shift();
+                next();
+            }
+        }
+    }
+
+    async waitForAll() {
+        if (this.running > 0) {
+            await new Promise(resolve => this.queue.push(resolve));
+        }
+    }
+}
+
 class AusLegalCasesCrawler {
     constructor(crawler) {
         this.crawler = crawler;
@@ -13,6 +44,10 @@ class AusLegalCasesCrawler {
             'https://www.austlii.edu.au/cgi-bin/viewtoc/au/cases/vic/VMC/',
             'https://www.austlii.edu.au/cgi-bin/viewtoc/au/cases/vic/VCAT/'
         ];
+        
+        // Create concurrency pool based on config
+        const concurrency = this.crawler.config.get('rateLimit').concurrency;
+        this.pool = new ConcurrencyPool(concurrency);
     }
 
     /**
@@ -41,28 +76,46 @@ class AusLegalCasesCrawler {
     }
 
     /**
-     * Process a single year for all courts
+     * Process a single court for a given year
+     */
+    async processCourt(baseUrl, year) {
+        const url = `${baseUrl}${year}/`;
+        try {
+            const cases = await this.extractCasesFromPage(url);
+            this.crawler.logger.info(`Processed ${url}: found ${cases.length} cases`);
+            return { cases, baseUrl, success: true };
+        } catch (error) {
+            if (error.statusCode === 500) {
+                this.crawler.logger.info(`Reached end of archive for ${baseUrl} at year ${year}`);
+                return { cases: [], baseUrl, success: false };
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Process a single year for all courts concurrently
      */
     async processYear(year) {
         const yearCases = [];
         const completedUrls = [];
         
-        for (const baseUrl of this.baseUrls) {
-            const url = `${baseUrl}${year}/`;
-            try {
-                const cases = await this.extractCasesFromPage(url);
+        // Process courts concurrently with controlled concurrency
+        const courtPromises = this.baseUrls.map(baseUrl => 
+            this.pool.add(() => this.processCourt(baseUrl, year))
+        );
+        
+        const results = await Promise.all(courtPromises);
+        
+        // Process results
+        results.forEach(({ cases, baseUrl, success }) => {
+            if (cases.length > 0) {
                 yearCases.push(...cases);
-                this.crawler.logger.info(`Processed ${url}: found ${cases.length} cases`);
-            } catch (error) {
-                if (error.statusCode === 500) {
-                    this.crawler.logger.info(`Reached end of archive for ${baseUrl} at year ${year}`);
-                    // Mark this URL as completed
-                    completedUrls.push(baseUrl);
-                } else {
-                    throw error; // Re-throw other errors
-                }
             }
-        }
+            if (!success) {
+                completedUrls.push(baseUrl);
+            }
+        });
 
         // Remove completed URLs from future processing
         this.baseUrls = this.baseUrls.filter(url => !completedUrls.includes(url));
@@ -91,6 +144,9 @@ class AusLegalCasesCrawler {
                 await this.saveResults();
                 
                 currentYear--;
+
+                // Wait for all pending requests to complete before proceeding to next year
+                await this.pool.waitForAll();
             }
 
             this.crawler.logger.info('Case collection completed', {

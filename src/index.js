@@ -1,6 +1,7 @@
 const Crawler = require('./client');
 const { ErrorFactory } = require('./client/errors');
 const { caseLawCollectionPipeline } = require('./flows/caselaw_casecollection');
+const { caseLawContentExtractionPipeline } = require('./flows/caselaw_contentextraction');
 
 /**
  * Example pipeline that extracts all links from a page
@@ -93,6 +94,7 @@ function createCrawler(options = {}) {
     crawler.addPipeline('extractLinks', linkExtractorPipeline);
     crawler.addPipeline('extractElements', elementExtractorPipeline);
     crawler.addPipeline('collectCases', caseLawCollectionPipeline);
+    crawler.addPipeline('extractContent', caseLawContentExtractionPipeline);
 
     // Add default middleware
     crawler.use(timingMiddleware);

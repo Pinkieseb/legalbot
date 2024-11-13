@@ -6,9 +6,11 @@
   },
   "dependencies": {
     "cheerio": "^1.0.0",
+    "mongoose": "^8.1.1",
     "node-fetch": "2",
     "optimal-select": "^4.0.1",
-    "puppeteer": "^23.7.1"
+    "puppeteer": "^23.7.1",
+    "turndown": "^7.1.2"
   },
   "installConfig": {
     "pnp": false
